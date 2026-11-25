@@ -1,0 +1,23 @@
+- name: Criar diretório das cópias locais (disco do sistema, separado do volume de dados)
+  ansible.builtin.file:
+    path: "{{ backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Instalar script de backup (mongodump + envio ao S3)
+  ansible.builtin.template:
+    src: todo-backup.sh.j2
+    dest: /usr/local/bin/todo-backup.sh
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Agendar backup automático
+  ansible.builtin.cron:
+    name: backup todo-app
+    user: root
+    minute: "{{ backup_cron_minute }}"
+    hour: "{{ backup_cron_hour }}"
+    job: /usr/local/bin/todo-backup.sh >> /var/log/todo-backup.log 2>&1

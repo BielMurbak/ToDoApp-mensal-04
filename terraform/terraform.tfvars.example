@@ -1,0 +1,12 @@
+# Exemplo para executar fora da pipeline (a pipeline passa estes valores com -var).
+environment       = "dev"
+app_instance_type = "t3.micro"
+db_instance_type  = "t3.micro"
+ssh_public_key    = "ssh-ed25519 AAAA... pm04"
+backup_bucket     = "pm04-todo-backups-123456789012"
+
+# AWS Academy (Learner Lab): não pode criar roles
+# instance_profile_name = "LabInstanceProfile"
+
+# Seu IP para SSH de diagnóstico
+# admin_cidrs = ["200.200.200.200/32"]

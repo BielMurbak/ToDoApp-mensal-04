@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+{% if acme_email | length > 0 %}
+{
+	email {{ acme_email }}
+}
+
+{% endif %}
+# Certificado HTTPS emitido e renovado automaticamente; HTTP redireciona para HTTPS
+{{ app_domain }} {
+	encode gzip
+	reverse_proxy frontend:80
+}

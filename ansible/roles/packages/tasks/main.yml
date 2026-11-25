@@ -1,0 +1,9 @@
+- name: Instalar pacotes base e adicionais (parâmetro extra_packages)
+  ansible.builtin.apt:
+    name: "{{ base_packages + extra_packages_list }}"
+    state: present
+    lock_timeout: 300
+
+- name: Pacotes garantidos nesta execução
+  ansible.builtin.debug:
+    msg: "{{ base_packages + extra_packages_list }}"

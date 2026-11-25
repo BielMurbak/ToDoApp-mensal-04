@@ -1,39 +1,60 @@
-version: '3.8'
-
+# Execução local (desenvolvimento). Na nuvem, a implantação é feita pela pipeline (terraform/ + ansible/) em duas VMs.
+# Senhas: valores de demonstração; para trocar, crie um arquivo .env a partir de .env.example.
 services:
   frontend:
     build:
       context: ./frontend  # Diretório do frontend
+    image: todo-frontend:local
     ports:
-      - "80:80"  # Expõe a porta 80 do contêiner para a porta 80 do host
+      - "80:80"  # Interface e API (/todos) no mesmo endereço
     networks:
       - todo-net
+    restart: unless-stopped
     depends_on:
-      - backend  # Garante que o backend esteja rodando antes de subir o frontend
+      backend:
+        condition: service_healthy  # Só sobe a interface quando a API está conectada ao banco
 
   backend:
     build:
       context: ./backend  # Diretório do backend
+    image: todo-backend:local
     ports:
-      - "5000:5000"  # Expõe a porta 5000 do contêiner para a porta 5000 do host
+      - "127.0.0.1:5000:5000"  # Acesso direto à API só pela própria máquina
+    environment:
+      - MONGO_URL=mongodb://${MONGO_APP_USER:-todo-app}:${MONGO_APP_PASSWORD:-todo-local}@mongo-todo:27017/todo-app?authSource=todo-app
     networks:
       - todo-net
+    restart: unless-stopped
     depends_on:
-      - mongo  # Garante que o MongoDB esteja rodando antes de iniciar o backend
+      mongo:
+        condition: service_healthy
 
   mongo:
     build:
-      context: ./banco-de-dados  # Diretório do backend
+      context: ./banco-de-dados  # Diretório do banco
+    image: todo-mongo:local
     container_name: mongo-todo
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"  # Banco não fica exposto na rede
     networks:
       - todo-net
+    restart: unless-stopped
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
-      - MONGO_INITDB_ROOT_PASSWORD=rootpassword
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD:-root-local}
       - MONGO_INITDB_DATABASE=todo-app
+      - MONGO_APP_USER=${MONGO_APP_USER:-todo-app}
+      - MONGO_APP_PASSWORD=${MONGO_APP_PASSWORD:-todo-local}
+    volumes:
+      - mongo-data:/data/db  # Tarefas preservadas entre reinícios e recriações
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
+volumes:
+  mongo-data:
 
 networks:
   todo-net:

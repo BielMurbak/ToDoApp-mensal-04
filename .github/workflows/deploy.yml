@@ -1,0 +1,307 @@
+# Pipeline principal: Terraform (provisiona/atualiza) -> Ansible (configura/mantém) -> teste funcional.
+# Execução manual em Actions > "Infraestrutura (Terraform + Ansible)" > Run workflow.
+name: Infraestrutura (Terraform + Ansible)
+run-name: "${{ inputs.action }} · ${{ inputs.environment }} · app ${{ inputs.app_instance_type }} / db ${{ inputs.db_instance_type }} · tag ${{ inputs.app_image_tag }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente de destino
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      action:
+        description: "plan = só mostra as mudanças · apply = cria/atualiza · destroy = backup final e remove tudo"
+        type: choice
+        options: [plan, apply, destroy]
+        default: apply
+      instance_name:
+        description: Nome base das VMs (gera <nome>-app e <nome>-db)
+        type: string
+        default: vm-pm04
+      app_instance_type:
+        description: Tipo da VM da aplicação
+        type: choice
+        options: [t3.micro, t3.small, t3.medium]
+        default: t3.micro
+      db_instance_type:
+        description: Tipo da VM do MongoDB
+        type: choice
+        options: [t3.micro, t3.small, t3.medium]
+        default: t3.micro
+      app_image_tag:
+        description: Versão das imagens (sha-xxxxxxx publicada pelo CI, ou latest)
+        type: string
+        default: latest
+      force_pull:
+        description: Baixar a imagem de novo mesmo com a mesma tag (use com latest)
+        type: boolean
+        default: false
+      update_os:
+        description: Aplicar atualizações do sistema operacional
+        type: boolean
+        default: false
+      extra_packages:
+        description: Pacotes adicionais (separados por vírgula)
+        type: string
+        default: "git,tree"
+      confirm_destroy:
+        description: "Para destroy, digite o nome do ambiente"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: read
+
+# Uma execução por ambiente de cada vez (protege o state)
+concurrency:
+  group: infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_environment: ${{ inputs.environment }}
+  TF_VAR_instance_name: ${{ inputs.instance_name }}
+  TF_VAR_app_instance_type: ${{ inputs.app_instance_type }}
+  TF_VAR_db_instance_type: ${{ inputs.db_instance_type }}
+  TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+  TF_VAR_instance_profile_name: ${{ vars.INSTANCE_PROFILE_NAME }}
+  TF_VAR_app_domain: ${{ vars.APP_DOMAIN }}
+  TF_VAR_admin_cidrs: ${{ vars.ADMIN_CIDRS || '[]' }}
+  TF_VAR_enable_nat_gateway: ${{ vars.ENABLE_NAT_GATEWAY || 'true' }}
+
+jobs:
+  terraform:
+    name: Terraform (${{ inputs.action }})
+    if: inputs.action != 'destroy'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      app_url: ${{ steps.out.outputs.app_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credenciais da AWS (GitHub Secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/terraform-init
+        with:
+          environment: ${{ inputs.environment }}
+
+      - name: terraform fmt e validate
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform validate
+
+      - name: terraform plan
+        id: plan
+        working-directory: terraform
+        run: |
+          set +e
+          terraform plan -no-color -out=tfplan -detailed-exitcode | tee plan.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          # 0 = sem mudanças, 2 = há mudanças, 1 = erro
+          [ "$code" -eq 1 ] && exit 1
+          echo "changes=$([ "$code" -eq 2 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Terraform plan (${{ inputs.environment }})"
+            echo '```'
+            grep -E '^(Plan:|No changes\.)|will be (created|destroyed|updated in-place|replaced)|must be replaced' plan.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: terraform apply
+        if: inputs.action == 'apply' && steps.plan.outputs.changes == 'true'
+        working-directory: terraform
+        run: terraform apply -no-color -auto-approve tfplan
+
+      - name: Sem alterações de infraestrutura
+        if: inputs.action == 'apply' && steps.plan.outputs.changes == 'false'
+        run: echo "Infraestrutura já está no estado desejado - nada a aplicar." | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Exportar saídas do Terraform
+        id: out
+        if: inputs.action == 'apply'
+        working-directory: terraform
+        run: |
+          terraform output -json > ../tf-outputs.json
+          echo "app_url=$(jq -r .app_url.value ../tf-outputs.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Inventário"
+            echo '```json'
+            jq .inventory.value ../tf-outputs.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apontar o domínio DuckDNS para o IP da aplicação
+        if: inputs.action == 'apply'
+        env:
+          DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
+        run: |
+          DOMAIN=$(jq -r .app_domain.value tf-outputs.json)
+          IP=$(jq -r .app_public_ip.value tf-outputs.json)
+          if [ -z "$DUCKDNS_TOKEN" ] || [[ "$DOMAIN" != *.duckdns.org ]]; then
+            echo "DuckDNS não configurado - usando $DOMAIN"
+            exit 0
+          fi
+          curl -fsS "https://www.duckdns.org/update?domains=${DOMAIN%.duckdns.org}&token=${DUCKDNS_TOKEN}&ip=${IP}" | grep -qx OK
+          echo "$DOMAIN -> $IP"
+
+      - name: Guardar saídas para o Ansible
+        if: inputs.action == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tf-outputs-${{ inputs.environment }}
+          path: tf-outputs.json
+          retention-days: 7
+
+  ansible:
+    name: Ansible (configuração e manutenção)
+    needs: terraform
+    if: inputs.action == 'apply'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tf-outputs-${{ inputs.environment }}
+
+      - name: Credenciais da AWS (GitHub Secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/ansible-setup
+        with:
+          tf-outputs: tf-outputs.json
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: ansible-playbook (SO, pacotes, Docker, MongoDB, aplicação, backup)
+        working-directory: ansible
+        env:
+          ANSIBLE_FORCE_COLOR: "1"
+          MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
+          MONGO_APP_PASSWORD: ${{ secrets.MONGO_APP_PASSWORD }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACME_EMAIL: ${{ vars.ACME_EMAIL }}
+          IN_TAG: ${{ inputs.app_image_tag }}
+          IN_FORCE_PULL: ${{ inputs.force_pull }}
+          IN_UPDATE_OS: ${{ inputs.update_os }}
+          IN_PACKAGES: ${{ inputs.extra_packages }}
+        run: |
+          export IMAGE_REGISTRY="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          EXTRA=$(jq -nc --arg t "$IN_TAG" --arg f "$IN_FORCE_PULL" --arg u "$IN_UPDATE_OS" --arg p "$IN_PACKAGES" \
+            '{app_image_tag: $t, force_pull: $f, update_os: $u, extra_packages: $p}')
+          echo "Parâmetros: $EXTRA"
+          set -o pipefail
+          ansible-playbook playbook.yml -e "$EXTRA" | tee ../ansible.log
+          {
+            echo "### Ansible - PLAY RECAP"
+            echo '```'
+            sed -n '/PLAY RECAP/,$p' ../ansible.log | sed 's/\x1b\[[0-9;]*m//g'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Teste funcional pelo endereço público (cadastrar, concluir, reabrir, excluir)
+        run: bash scripts/smoke-test.sh "${{ needs.terraform.outputs.app_url }}"
+
+      - name: Resumo
+        run: |
+          {
+            echo "### Aplicação publicada"
+            echo "- URL: ${{ needs.terraform.outputs.app_url }}"
+            echo "- Versão: \`${{ inputs.app_image_tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remover SSH temporário do runner
+        if: always()
+        run: bash scripts/runner-ssh.sh close "$(jq -r .app_security_group_id.value tf-outputs.json)"
+
+  destroy:
+    name: Desativar ambiente (backup final + terraform destroy)
+    if: inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Conferir confirmação
+        if: inputs.confirm_destroy != inputs.environment
+        run: |
+          echo "::error::Para destruir, digite '${{ inputs.environment }}' em confirm_destroy."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Credenciais da AWS (GitHub Secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/terraform-init
+        with:
+          environment: ${{ inputs.environment }}
+
+      - name: Verificar se o ambiente existe
+        id: exists
+        working-directory: terraform
+        run: |
+          terraform output -json > ../tf-outputs.json
+          echo "running=$(jq 'has("app_public_ip")' ../tf-outputs.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/ansible-setup
+        if: steps.exists.outputs.running == 'true'
+        with:
+          tf-outputs: tf-outputs.json
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Backup final para o S3 antes de remover o volume
+        if: steps.exists.outputs.running == 'true'
+        working-directory: ansible
+        env:
+          MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
+          MONGO_APP_PASSWORD: ${{ secrets.MONGO_APP_PASSWORD }}
+        run: ansible-playbook ops.yml -e operation=backup
+
+      - name: Remover SSH temporário do runner
+        if: always() && steps.exists.outputs.running == 'true'
+        run: bash scripts/runner-ssh.sh close "$(jq -r .app_security_group_id.value tf-outputs.json)"
+
+      - name: terraform destroy
+        working-directory: terraform
+        run: |
+          terraform plan -destroy -no-color | grep -E '^Plan:|will be destroyed' || true
+          terraform destroy -no-color -auto-approve
+
+      - name: O que continua existindo (e pode gerar cobrança)
+        run: |
+          {
+            echo "### Ambiente ${{ inputs.environment }} removido"
+            echo "Continuam existindo:"
+            echo "- \`s3://${BACKUP_BUCKET}/backups/${{ inputs.environment }}/\` - backups (expiram em 14 dias)"
+            echo "- \`s3://${TF_STATE_BUCKET}\` - Terraform state versionado (centavos/mês)"
+            echo "- Imagens no GHCR (gratuito para repositório público)"
+            echo ""
+            echo "Backups atuais:"
+            echo '```'
+            aws s3 ls "s3://${BACKUP_BUCKET}/backups/${{ inputs.environment }}/" || echo "(nenhum)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

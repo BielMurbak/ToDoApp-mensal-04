@@ -1,0 +1,98 @@
+- name: Conferir se a senha da aplicação no banco foi informada
+  ansible.builtin.assert:
+    that: mongo_app_password | length > 0
+    fail_msg: Defina o Secret MONGO_APP_PASSWORD.
+    quiet: true
+
+- name: Criar diretório da implantação
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Entrar no registro de imagens (token temporário da execução da pipeline)
+  community.docker.docker_login:
+    registry_url: "{{ image_registry.split('/')[0] }}"
+    username: "{{ registry_user }}"
+    password: "{{ registry_token }}"
+  when: registry_token | length > 0
+  # O token muda a cada execução; login não altera o estado da aplicação
+  changed_when: false
+  no_log: true
+
+- name: Gravar configuração da API (endereço privado e credencial própria do banco)
+  ansible.builtin.template:
+    src: app.env.j2
+    dest: "{{ app_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Gravar configuração do Caddy (HTTPS automático)
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ app_dir }}/Caddyfile"
+    mode: "0644"
+  notify: Recarregar Caddy
+
+- name: Gravar definição dos contêineres da aplicação
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ app_dir }}/compose.yml"
+    mode: "0644"
+
+- name: Verificar acesso da VM da aplicação ao MongoDB pela rede privada
+  ansible.builtin.wait_for:
+    host: "{{ db_private_ip }}"
+    port: 27017
+    timeout: 60
+
+- name: Subir/atualizar contêineres e aguardar ficarem saudáveis
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}"
+    project_name: todo-app
+    state: present
+    pull: "{{ 'always' if force_pull | bool else 'missing' }}"
+    remove_orphans: true
+    wait: true
+    wait_timeout: 180
+  register: app_compose
+
+- name: Registrar versão implantada
+  ansible.builtin.copy:
+    dest: "{{ app_dir }}/VERSION"
+    content: "{{ app_image_tag }}\n"
+    mode: "0644"
+
+- name: Aplicar recarga do Caddy, se a configuração mudou
+  ansible.builtin.meta: flush_handlers
+
+- name: Verificar a aplicação pelo endereço público HTTPS (API + banco)
+  ansible.builtin.uri:
+    url: "https://{{ app_domain }}/health"
+    return_content: true
+  register: app_public_health
+  # Primeira emissão do certificado (e propagação do DNS) pode levar alguns minutos
+  until: app_public_health.status == 200 and app_public_health.json.db == 'up'
+  retries: 30
+  delay: 10
+  delegate_to: localhost
+  become: false
+
+- name: Verificar listagem de tarefas pelo endereço público
+  ansible.builtin.uri:
+    url: "https://{{ app_domain }}/todos"
+  register: app_public_todos
+  delegate_to: localhost
+  become: false
+
+- name: Resultado da implantação
+  ansible.builtin.debug:
+    msg:
+      - "URL: https://{{ app_domain }}"
+      - "Versão: {{ app_image_tag }}"
+      - "Saúde: {{ app_public_health.json }}"
+      - "Tarefas cadastradas: {{ app_public_todos.json | length }}"

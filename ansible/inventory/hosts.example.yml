@@ -1,0 +1,20 @@
+# Gerado pela pipeline a partir do "terraform output" (scripts/gen-inventory.sh) em inventory/hosts.yml.
+# Este arquivo só mostra o formato; hosts.yml não é versionado.
+all:
+  vars:
+    ansible_user: ubuntu
+    environment_name: dev
+    aws_region: us-east-1
+    app_domain: 54-10-20-30.sslip.io
+    app_public_ip: 54.10.20.30
+    db_private_ip: 10.20.2.10
+    db_data_volume_id: vol-0123456789abcdef0
+    backup_bucket: pm04-todo-backups-123456789012
+    backup_prefix: backups/dev/
+  children:
+    app:
+      hosts:
+        10.20.1.25:   # IP privado da VM da aplicação (SSH via bastion = IP público)
+    db:
+      hosts:
+        10.20.2.10:

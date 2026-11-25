@@ -1,0 +1,32 @@
+# Prepara as VMs do zero e mantém SO, pacotes, Docker e contêineres atualizados.
+# Uso pela pipeline:
+#   ansible-playbook playbook.yml -e app_image_tag=sha-abc1234 -e update_os=true -e extra_packages="git,tree"
+
+- name: Aguardar as VMs aceitarem conexão
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Esperar SSH (VMs recém-criadas ou reiniciadas)
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+- name: Sistema operacional, pacotes e Docker
+  hosts: all
+  become: true
+  roles:
+    - os_updates
+    - packages
+    - docker
+
+- name: MongoDB na VM exclusiva do banco
+  hosts: db
+  become: true
+  roles:
+    - mongo
+    - backup
+
+- name: Aplicação (Caddy HTTPS + Nginx/React + API)
+  hosts: app
+  become: true
+  roles:
+    - app

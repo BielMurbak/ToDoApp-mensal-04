@@ -1,5 +1,4 @@
-
-FROM mongo:latest
+FROM mongo:7.0.14
 
 
 COPY ./init-mongo.js /docker-entrypoint-initdb.d/

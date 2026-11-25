@@ -1,0 +1,106 @@
+# Rotinas de operação para os alunos: saúde, logs, reinício, backup, teste de restauração,
+# restauração e preparação da lista da apresentação. Não altera a infraestrutura.
+name: Operação (rotinas do dia a dia)
+run-name: "${{ inputs.operation }} · ${{ inputs.environment }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      operation:
+        description: Rotina
+        type: choice
+        options:
+          - health
+          - logs
+          - restart-app
+          - restart-db
+          - backup
+          - restore-test
+          - restore
+          - reset-list
+        default: health
+      confirm:
+        description: "restore: digite RESTAURAR · reset-list: digite LIMPAR"
+        type: string
+        default: ""
+      log_lines:
+        description: Linhas de log (operação logs)
+        type: string
+        default: "100"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  ops:
+    name: ${{ inputs.operation }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credenciais da AWS (GitHub Secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/terraform-init
+        with:
+          environment: ${{ inputs.environment }}
+
+      - name: Ler endereços do ambiente (terraform output)
+        working-directory: terraform
+        run: |
+          terraform output -json > ../tf-outputs.json
+          if [ "$(jq 'has("app_public_ip")' ../tf-outputs.json)" != "true" ]; then
+            echo "::error::Ambiente ${{ inputs.environment }} não existe. Rode a pipeline de infraestrutura com action=apply."
+            exit 1
+          fi
+
+      - uses: ./.github/actions/ansible-setup
+        with:
+          tf-outputs: tf-outputs.json
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Executar rotina ${{ inputs.operation }}
+        working-directory: ansible
+        env:
+          ANSIBLE_FORCE_COLOR: "1"
+          MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
+          MONGO_APP_PASSWORD: ${{ secrets.MONGO_APP_PASSWORD }}
+          IN_OPERATION: ${{ inputs.operation }}
+          IN_CONFIRM: ${{ inputs.confirm }}
+          IN_LOG_LINES: ${{ inputs.log_lines }}
+        run: |
+          EXTRA=$(jq -nc --arg o "$IN_OPERATION" --arg c "$IN_CONFIRM" --arg l "$IN_LOG_LINES" \
+            '{operation: $o, confirm: $c, log_lines: $l}')
+          set -o pipefail
+          ansible-playbook ops.yml -e "$EXTRA" | tee ../ops.log
+          {
+            echo "### ${IN_OPERATION} (${{ inputs.environment }})"
+            echo '```'
+            sed 's/\x1b\[[0-9;]*m//g' ../ops.log | grep -vE '^(skipping|ok: \[localhost\])' | tail -n 80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remover SSH temporário do runner
+        if: always()
+        run: |
+          [ -f tf-outputs.json ] && bash scripts/runner-ssh.sh close "$(jq -r .app_security_group_id.value tf-outputs.json)" || true

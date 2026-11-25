@@ -1,0 +1,267 @@
+# Rotinas de operação acionadas pela pipeline "Operação" (.github/workflows/ops.yml).
+#   ansible-playbook ops.yml -e operation=<health|logs|restart-app|restart-db|backup|restore-test|restore|reset-list>
+# restore e reset-list exigem -e confirm=RESTAURAR / -e confirm=LIMPAR.
+
+- name: Validar operação solicitada
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Conferir operação e confirmação
+      ansible.builtin.assert:
+        that:
+          - operation in ['health', 'logs', 'restart-app', 'restart-db', 'backup', 'restore-test', 'restore', 'reset-list']
+          - operation != 'restore' or (confirm | default('')) == 'RESTAURAR'
+          - operation != 'reset-list' or (confirm | default('')) == 'LIMPAR'
+        fail_msg: >-
+          Operação inválida ou sem confirmação. restore exige confirm=RESTAURAR e reset-list exige confirm=LIMPAR.
+        quiet: true
+
+# ---------- health: estado dos serviços, saúde pública e isolamento do banco ----------
+
+- name: Saúde da VM da aplicação
+  hosts: app
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Estado dos contêineres da aplicação
+      ansible.builtin.shell: |
+        echo "Versão implantada: $(cat VERSION)"
+        docker compose -p todo-app ps
+      args:
+        chdir: "{{ app_dir }}"
+      register: ops_app_ps
+      changed_when: false
+      when: operation == 'health'
+
+    - name: Saúde pelo endereço público (API + conexão com o banco)
+      ansible.builtin.uri:
+        url: "https://{{ app_domain }}/health"
+        status_code: [200, 503]
+      register: ops_public_health
+      delegate_to: localhost
+      become: false
+      when: operation == 'health'
+
+    - name: Isolamento - porta do MongoDB fechada no IP público
+      ansible.builtin.wait_for:
+        host: "{{ app_public_ip }}"
+        port: "{{ item }}"
+        timeout: 5
+      loop: [27017, 5000]
+      register: ops_closed_ports
+      ignore_errors: true
+      delegate_to: localhost
+      become: false
+      when: operation == 'health'
+
+    - name: Resultado - aplicação
+      ansible.builtin.debug:
+        msg:
+          - "{{ ops_app_ps.stdout }}"
+          - "Saúde pública (https://{{ app_domain }}/health): HTTP {{ ops_public_health.status }} {{ ops_public_health.json | default('') }}"
+          - "Porta 27017 no IP público: {{ 'FECHADA (ok)' if ops_closed_ports.results[0].failed else 'ABERTA (problema!)' }}"
+          - "Porta 5000 no IP público: {{ 'FECHADA (ok)' if ops_closed_ports.results[1].failed else 'ABERTA (problema!)' }}"
+      when: operation == 'health'
+
+- name: Saúde da VM do banco
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Estado do contêiner e do volume de dados
+      ansible.builtin.shell: |
+        docker ps --filter name={{ mongo_container }}
+        df -h {{ mongo_data_dir }} | tail -1
+        echo "Último backup local: $(ls -1t {{ backup_dir }} 2>/dev/null | head -1)"
+      register: ops_db_status
+      changed_when: false
+      when: operation == 'health'
+
+    - name: Tarefas no banco
+      ansible.builtin.shell: "{{ mongo_admin_shell }}"
+      args:
+        stdin: "print(db.todos.countDocuments())"
+      register: ops_db_count
+      changed_when: false
+      when: operation == 'health'
+
+    - name: Resultado - banco
+      ansible.builtin.debug:
+        msg: "{{ ops_db_status.stdout_lines + ['Tarefas no banco: ' + ops_db_count.stdout] }}"
+      when: operation == 'health'
+
+# ---------- logs ----------
+
+- name: Logs da aplicação
+  hosts: app
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Últimas linhas de log dos contêineres
+      ansible.builtin.command: docker compose -p todo-app logs --no-color --tail {{ log_lines | default(100) }}
+      args:
+        chdir: "{{ app_dir }}"
+      register: ops_app_logs
+      changed_when: false
+      when: operation == 'logs'
+
+    - name: Logs - aplicação
+      ansible.builtin.debug:
+        var: ops_app_logs.stdout_lines
+      when: operation == 'logs'
+
+- name: Logs do banco
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Últimas linhas de log do MongoDB e do backup
+      ansible.builtin.shell: |
+        docker logs --tail {{ log_lines | default(100) }} {{ mongo_container }} 2>&1
+        echo "----- backup -----"
+        tail -n 20 /var/log/todo-backup.log 2>/dev/null || echo "sem registros de backup ainda"
+      register: ops_db_logs
+      changed_when: false
+      when: operation == 'logs'
+
+    - name: Logs - banco
+      ansible.builtin.debug:
+        var: ops_db_logs.stdout_lines
+      when: operation == 'logs'
+
+# ---------- reinício ----------
+
+- name: Reiniciar serviços da aplicação
+  hosts: app
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Reiniciar contêineres da aplicação (dados não são afetados)
+      ansible.builtin.command: docker compose -p todo-app restart
+      args:
+        chdir: "{{ app_dir }}"
+      when: operation == 'restart-app'
+
+- name: Reiniciar banco
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Reiniciar contêiner do MongoDB (dados ficam no volume)
+      ansible.builtin.command: docker restart {{ mongo_container }}
+      when: operation == 'restart-db'
+
+# ---------- backup e recuperação ----------
+
+- name: Backup e recuperação
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Backup de segurança antes de restaurar ou limpar
+      ansible.builtin.command: /usr/local/bin/todo-backup.sh
+      register: ops_backup
+      when: operation in ['backup', 'restore', 'reset-list']
+
+    - name: Resultado do backup
+      ansible.builtin.debug:
+        var: ops_backup.stdout
+      when: operation in ['backup', 'restore', 'reset-list']
+
+    - name: Localizar backup mais recente no S3
+      ansible.builtin.shell: >-
+        docker run --rm --network host {{ awscli_image }}
+        s3 ls s3://{{ backup_bucket }}/{{ backup_prefix }} --region {{ aws_region }}
+        | awk '{print $4}' | grep archive.gz | sort | tail -1
+      register: ops_latest
+      changed_when: false
+      failed_when: ops_latest.stdout | length == 0
+      when: operation in ['restore-test', 'restore']
+
+    - name: Baixar backup do S3 (valida a cópia fora da VM)
+      ansible.builtin.command: >-
+        docker run --rm --network host -v /tmp:/restore {{ awscli_image }}
+        s3 cp s3://{{ backup_bucket }}/{{ backup_prefix }}{{ ops_latest.stdout }} /restore/todo-restore.archive.gz
+        --region {{ aws_region }} --only-show-errors
+      changed_when: false
+      when: operation in ['restore-test', 'restore']
+
+    - name: Teste de restauração em ambiente isolado (sem tocar no banco da demonstração)
+      when: operation == 'restore-test'
+      block:
+        - name: Subir MongoDB temporário sem rede
+          ansible.builtin.command: docker run -d --name mongo-restore-test --network none {{ mongo_image }}
+
+        - name: Aguardar MongoDB temporário
+          ansible.builtin.command: docker exec mongo-restore-test mongosh --quiet --eval "db.adminCommand('ping').ok"
+          register: ops_tmp_ping
+          until: ops_tmp_ping.rc == 0
+          retries: 20
+          delay: 3
+          changed_when: false
+
+        - name: Restaurar backup no MongoDB temporário
+          ansible.builtin.shell: >-
+            docker cp /tmp/todo-restore.archive.gz mongo-restore-test:/tmp/b.archive.gz &&
+            docker exec mongo-restore-test mongorestore --quiet --archive=/tmp/b.archive.gz --gzip
+
+        - name: Contar tarefas restauradas
+          ansible.builtin.command: docker exec mongo-restore-test mongosh --quiet todo-app --eval "print(db.todos.countDocuments())"
+          register: ops_restored_count
+          changed_when: false
+
+        - name: Contar tarefas no banco da demonstração
+          ansible.builtin.shell: "{{ mongo_admin_shell }}"
+          args:
+            stdin: "print(db.todos.countDocuments())"
+          register: ops_prod_count
+          changed_when: false
+
+        - name: Resultado do teste de restauração
+          ansible.builtin.debug:
+            msg:
+              - "Backup testado: s3://{{ backup_bucket }}/{{ backup_prefix }}{{ ops_latest.stdout }}"
+              - "Tarefas restauradas no ambiente isolado: {{ ops_restored_count.stdout }}"
+              - "Tarefas no banco da demonstração (não alterado): {{ ops_prod_count.stdout }}"
+      always:
+        - name: Remover MongoDB temporário
+          ansible.builtin.command: docker rm -f mongo-restore-test
+          failed_when: false
+
+    - name: Restaurar o banco da demonstração a partir do último backup
+      ansible.builtin.shell: >-
+        docker cp /tmp/todo-restore.archive.gz {{ mongo_container }}:/tmp/r.archive.gz &&
+        docker exec {{ mongo_container }} sh -c
+        'mongorestore --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin
+        --nsInclude "todo-app.*" --drop --archive=/tmp/r.archive.gz --gzip && rm /tmp/r.archive.gz'
+      when: operation == 'restore'
+
+    - name: Apagar cópia temporária do backup
+      ansible.builtin.file:
+        path: /tmp/todo-restore.archive.gz
+        state: absent
+      changed_when: false
+      when: operation in ['restore-test', 'restore']
+
+# ---------- preparar nova lista para a apresentação ----------
+
+- name: Preparar lista da apresentação
+  hosts: db
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Substituir tarefas pela lista de demonstração (backup feito antes)
+      ansible.builtin.shell: "{{ mongo_admin_shell }}"
+      args:
+        stdin: |
+          db.todos.deleteMany({});
+          db.todos.insertMany({{ demo_todos | to_json }});
+          print('Tarefas na lista: ' + db.todos.countDocuments());
+      register: ops_reset
+      when: operation == 'reset-list'
+
+    - name: Resultado da preparação
+      ansible.builtin.debug:
+        var: ops_reset.stdout
+      when: operation == 'reset-list'

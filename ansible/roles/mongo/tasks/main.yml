@@ -1,0 +1,84 @@
+- name: Conferir se as senhas do banco foram informadas
+  ansible.builtin.assert:
+    that:
+      - mongo_root_password | length > 0
+      - mongo_app_password | length > 0
+    fail_msg: Defina os Secrets MONGO_ROOT_PASSWORD e MONGO_APP_PASSWORD.
+    quiet: true
+
+# ---------- Volume persistente (EBS separado do disco do sistema) ----------
+
+- name: Esperar o volume de dados aparecer na VM
+  ansible.builtin.wait_for:
+    path: "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{{ db_data_volume_id | replace('-', '') }}"
+    timeout: 180
+
+- name: Criar sistema de arquivos no volume (só se ainda não existir; nunca formata dados existentes)
+  community.general.filesystem:
+    dev: "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{{ db_data_volume_id | replace('-', '') }}"
+    fstype: ext4
+
+- name: Montar o volume de dados do MongoDB
+  ansible.posix.mount:
+    path: "{{ mongo_data_dir }}"
+    src: "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_{{ db_data_volume_id | replace('-', '') }}"
+    fstype: ext4
+    opts: defaults,nofail
+    state: mounted
+
+- name: Ajustar dono do diretório de dados (usuário mongodb da imagem oficial, uid 999)
+  ansible.builtin.file:
+    path: "{{ mongo_data_dir }}"
+    state: directory
+    owner: "999"
+    group: "999"
+    mode: "0750"
+
+# ---------- Contêiner do MongoDB ----------
+
+- name: Criar diretórios da implantação do banco
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ db_dir }}"
+    - "{{ db_dir }}/init"
+
+- name: Copiar script de inicialização (usuário da aplicação e dados de demonstração)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../banco-de-dados/init-mongo.js"
+    dest: "{{ db_dir }}/init/init-mongo.js"
+    mode: "0644"
+
+- name: Gravar credenciais do banco (arquivo restrito ao root)
+  ansible.builtin.template:
+    src: db.env.j2
+    dest: "{{ db_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Gravar definição do contêiner do banco
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ db_dir }}/compose.yml"
+    mode: "0644"
+
+- name: Subir o MongoDB e aguardar ficar saudável
+  community.docker.docker_compose_v2:
+    project_src: "{{ db_dir }}"
+    project_name: todo-db
+    state: present
+    pull: "{{ 'always' if force_pull | bool else 'missing' }}"
+    wait: true
+    wait_timeout: 180
+
+- name: Confirmar que o banco escuta só no IP privado
+  ansible.builtin.wait_for:
+    host: "{{ db_private_ip }}"
+    port: 27017
+    timeout: 60

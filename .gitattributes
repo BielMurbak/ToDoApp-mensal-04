@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Scripts e templates executados no Linux sempre com LF
+*.sh text eol=lf
+*.j2 text eol=lf

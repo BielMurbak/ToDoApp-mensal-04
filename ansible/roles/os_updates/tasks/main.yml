@@ -1,0 +1,41 @@
+- name: Aguardar o cloud-init terminar (evita disputa pelo apt na primeira inicialização)
+  ansible.builtin.command: cloud-init status --wait
+  changed_when: false
+  failed_when: false
+
+- name: Atualizar o cache do apt
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+  changed_when: false
+
+- name: Verificar atualizações disponíveis
+  ansible.builtin.command: apt list --upgradable
+  register: os_upgradable
+  changed_when: false
+
+- name: Informar atualizações pendentes
+  ansible.builtin.debug:
+    msg: >-
+      {{ (os_upgradable.stdout_lines | select('search', 'upgradable') | list | length) }} pacote(s) com atualização disponível;
+      update_os={{ update_os | bool }}
+
+- name: Aplicar atualizações do sistema operacional
+  ansible.builtin.apt:
+    upgrade: dist
+    autoremove: true
+    lock_timeout: 300
+  when: update_os | bool
+
+- name: Verificar se o Ubuntu pediu reinicialização
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: os_reboot_required
+
+- name: Reiniciar a VM para concluir as atualizações
+  ansible.builtin.reboot:
+    reboot_timeout: 600
+  when:
+    - update_os | bool
+    - os_reboot_required.stat.exists

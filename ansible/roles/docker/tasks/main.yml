@@ -1,0 +1,57 @@
+- name: Criar diretório de chaves do apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Baixar a chave do repositório oficial do Docker
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Adicionar o repositório oficial do Docker
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }} signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+    filename: docker
+    state: present
+
+- name: Instalar Docker Engine e plugin Compose
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+      - python3-docker
+    state: present
+    lock_timeout: 300
+
+- name: Configurar rotação de logs dos contêineres
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" }
+      }
+  notify: Reiniciar Docker
+
+- name: Garantir Docker ativo e iniciando com a VM
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Permitir que o usuário ubuntu use o Docker (diagnóstico via SSH)
+  ansible.builtin.user:
+    name: ubuntu
+    groups: docker
+    append: true
+
+- name: Aplicar alterações pendentes do Docker antes dos contêineres
+  ansible.builtin.meta: flush_handlers

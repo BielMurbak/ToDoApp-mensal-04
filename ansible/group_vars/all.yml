@@ -1,0 +1,68 @@
+# ---------- Parâmetros da pipeline (sobrescritos com -e) ----------
+
+# Versão das imagens da aplicação (tag publicada pelo workflow de CI: sha-xxxxxxx ou latest)
+app_image_tag: latest
+# true = baixa a imagem de novo mesmo que a tag já exista na VM (necessário para validar "latest")
+force_pull: false
+# true = aplica as atualizações do sistema operacional (e reinicia se o Ubuntu pedir)
+update_os: false
+# Pacotes adicionais separados por vírgula, ex.: "git,unzip,tree"
+extra_packages: ""
+
+# ---------- Imagens ----------
+
+image_registry: "{{ lookup('env', 'IMAGE_REGISTRY') | default('ghcr.io/bielmurbak', true) }}"
+backend_image: "{{ image_registry }}/todo-backend:{{ app_image_tag }}"
+frontend_image: "{{ image_registry }}/todo-frontend:{{ app_image_tag }}"
+mongo_image: mongo:7.0.14
+caddy_image: caddy:2.8.4-alpine
+awscli_image: amazon/aws-cli:2.17.0
+
+# Login no registro (GHCR) com o token da execução; vazio = imagens públicas
+registry_user: "{{ lookup('env', 'REGISTRY_USER') }}"
+registry_token: "{{ lookup('env', 'REGISTRY_TOKEN') }}"
+
+# ---------- Pacotes ----------
+
+base_packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - jq
+  - netcat-openbsd
+  - htop
+  - unzip
+extra_packages_list: "{{ extra_packages | split(',') | map('trim') | reject('equalto', '') | list }}"
+
+# ---------- Banco ----------
+
+mongo_app_user: todo-app
+# Segredos vêm do ambiente (GitHub Secrets), nunca do repositório
+mongo_root_password: "{{ lookup('env', 'MONGO_ROOT_PASSWORD') }}"
+mongo_app_password: "{{ lookup('env', 'MONGO_APP_PASSWORD') }}"
+mongo_container: mongo-todo
+mongo_data_dir: /data/mongo
+db_dir: /opt/todo-db
+
+# Comando para rodar mongosh como admin dentro do container (script via stdin, senha só no ambiente do container)
+mongo_admin_shell: >-
+  docker exec -i {{ mongo_container }} sh -c
+  'mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin todo-app'
+
+# ---------- Aplicação ----------
+
+app_dir: /opt/todo-app
+acme_email: "{{ lookup('env', 'ACME_EMAIL') }}"
+
+# ---------- Backup ----------
+
+backup_dir: /var/backups/todo-mongo
+backup_keep_days: 7
+backup_cron_minute: "0"
+backup_cron_hour: "*/6"
+
+# Lista de demonstração usada pela operação reset-list
+demo_todos:
+  - { text: "Conhecer o ToDo App na Feira de Profissões", completed: false }
+  - { text: "Adicionar uma tarefa pelo celular", completed: false }
+  - { text: "Implantar a aplicação na nuvem", completed: true }

@@ -1,0 +1,42 @@
+# {{ ansible_managed }}
+# Caddy (443) -> Nginx/React (frontend:80) -> /todos -> API (backend:5000) -> MongoDB ({{ db_private_ip }}, rede privada)
+services:
+  backend:
+    image: {{ backend_image }}
+    restart: unless-stopped
+    env_file: .env
+    networks: [todo-net]
+
+  frontend:
+    image: {{ frontend_image }}
+    restart: unless-stopped
+    environment:
+      - API_UPSTREAM=http://backend:5000
+    networks: [todo-net]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  caddy:
+    image: {{ caddy_image }}
+    container_name: todo-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [todo-net]
+    depends_on:
+      frontend:
+        condition: service_healthy
+
+volumes:
+  caddy-data:   # certificados: evita emitir de novo a cada recriação
+  caddy-config:
+
+networks:
+  todo-net:

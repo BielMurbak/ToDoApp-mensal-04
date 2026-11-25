@@ -1,0 +1,40 @@
+name: Ansible setup
+description: Instala o Ansible, gera o inventário a partir do terraform output e libera o SSH do runner.
+inputs:
+  tf-outputs:
+    description: Arquivo JSON do "terraform output -json"
+    required: true
+  ssh-private-key:
+    description: Chave privada SSH da pipeline
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Instalar Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Instalar Ansible e coleções
+      shell: bash
+      run: |
+        pip install --quiet "ansible-core>=2.18,<2.21"
+        ansible-galaxy collection install -r ansible/requirements.yml
+        ansible --version | head -1
+
+    - name: Gravar chave SSH da pipeline
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+      run: |
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/pm04
+        chmod 600 ~/.ssh/pm04
+
+    - name: Gerar inventário do Ansible
+      shell: bash
+      run: bash scripts/gen-inventory.sh "${{ inputs.tf-outputs }}"
+
+    - name: Liberar SSH temporário para o runner
+      shell: bash
+      run: bash scripts/runner-ssh.sh open "$(jq -r .app_security_group_id.value '${{ inputs.tf-outputs }}')"

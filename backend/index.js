@@ -5,18 +5,30 @@ const bodyParser = require('body-parser');
 
 // Inicializando o app Express
 const app = express();
-const port = 5000;
+const port = process.env.PORT || 5000;
 
-// Conexão com o MongoDB (com autenticação)
-mongoose.connect('mongodb://root:rootpassword@mongo-todo:27017/todo-app?authSource=admin', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-  .then(() => console.log('Conectado ao MongoDB'))
-  .catch((err) => console.error('Erro ao conectar ao MongoDB:', err));
+// Endereço e credenciais do banco vêm do ambiente (nunca do código)
+const mongoUrl = process.env.MONGO_URL;
+if (!mongoUrl) {
+  console.error('Variável MONGO_URL não definida');
+  process.exit(1);
+}
+
+// Conexão com o MongoDB, tentando de novo enquanto o banco não estiver pronto
+const conectar = async () => {
+  try {
+    await mongoose.connect(mongoUrl);
+    console.log('Conectado ao MongoDB');
+  } catch (err) {
+    console.error('Erro ao conectar ao MongoDB, nova tentativa em 5s:', err.message);
+    setTimeout(conectar, 5000);
+  }
+};
+conectar();
 
 // Middleware para habilitar CORS e processar JSON
-app.use(cors());
+// Em produção o frontend e a API ficam no mesmo endereço; CORS_ORIGIN restringe chamadas de outras origens
+app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 app.use(bodyParser.json());
 
 // Definindo o modelo de Tarefa (To-do)
@@ -26,6 +38,16 @@ const TodoSchema = new mongoose.Schema({
 });
 
 const Todo = mongoose.model('Todo', TodoSchema);
+
+// Verificação de saúde: responde 200 só quando a conexão com o banco está ativa
+app.get('/health', async (req, res) => {
+  try {
+    await mongoose.connection.db.admin().ping();
+    res.json({ status: 'ok', db: 'up' });
+  } catch (err) {
+    res.status(503).json({ status: 'erro', db: 'down' });
+  }
+});
 
 // Rota para obter todas as tarefas (GET)
 app.get('/todos', async (req, res) => {
@@ -92,7 +114,7 @@ app.delete('/todos/:id', async (req, res) => {
   }
 });
 
-// Iniciando o servidor na porta 5000
+// Iniciando o servidor na porta configurada
 app.listen(port, () => {
   console.log(`Servidor rodando na porta ${port}`);
 });

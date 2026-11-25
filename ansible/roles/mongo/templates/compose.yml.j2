@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+services:
+  mongo:
+    image: {{ mongo_image }}
+    container_name: {{ mongo_container }}
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # Publicado só no IP privado da VPC; o security group libera apenas a VM da aplicação
+      - "{{ db_private_ip }}:27017:27017"
+    volumes:
+      - {{ mongo_data_dir }}:/data/db
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
