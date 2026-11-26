@@ -42,7 +42,8 @@
     state: directory
     owner: root
     group: root
-    mode: "0750"
+    # O MongoDB lê os scripts de init como usuário mongodb (não root)
+    mode: "0755"
   loop:
     - "{{ db_dir }}"
     - "{{ db_dir }}/init"
@@ -76,6 +77,23 @@
     pull: "{{ 'always' if force_pull | bool else 'missing' }}"
     wait: true
     wait_timeout: 180
+
+# O script de init só roda com o volume vazio; esta tarefa garante o usuário da aplicação em qualquer caso
+- name: Garantir usuário da aplicação no MongoDB
+  ansible.builtin.shell: "{{ mongo_admin_shell }}"
+  args:
+    stdin: |
+      const user = process.env.MONGO_APP_USER;
+      const app = db.getSiblingDB('todo-app');
+      if (app.getUser(user)) {
+        print('EXISTE');
+      } else {
+        app.createUser({ user: user, pwd: process.env.MONGO_APP_PASSWORD, roles: [{ role: 'readWrite', db: 'todo-app' }] });
+        print('CRIADO');
+      }
+  register: mongo_app_user_result
+  changed_when: "'CRIADO' in mongo_app_user_result.stdout"
+  no_log: true
 
 - name: Confirmar que o banco escuta só no IP privado
   ansible.builtin.wait_for:
