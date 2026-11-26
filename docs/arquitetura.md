@@ -10,7 +10,7 @@
 | Interface React acessível pelo navegador | Nginx servindo o build React (imagem `todo-frontend`) |
 | API Express (`/todos`, `/todos/:id`) no mesmo endereço | Nginx encaminha `/todos` e `/health` para a API (imagem `todo-backend`) |
 | MongoDB com dados de demonstração | `mongo:7.0.14` em VM exclusiva, usuário próprio da aplicação |
-| Endereço público HTTPS | Caddy com certificado automático (Let's Encrypt) em `<nome>.duckdns.org` (gratuito) ou `<ip>.sslip.io` |
+| Endereço público HTTPS | Caddy com certificado automático (Let's Encrypt) em `mensal.belottimoveis.com.br` (DNS na Cloudflare atualizado pela pipeline) |
 | Preservar as tarefas | Volume EBS separado + backups no S3 |
 | Operação pelos alunos | Pipelines de operação (saúde, logs, reinício, backup, restauração, preparar lista) |
 
@@ -46,7 +46,7 @@ Fluxo de uma requisição: navegador → Caddy (TLS) → Nginx → `/todos` → 
 | Saída da VM do banco | NAT Gateway (desligável com `ENABLE_NAT_GATEWAY=false`) | Instalar pacotes/imagens sem IP público; é o maior custo, por isso pode ser desligado depois da configuração |
 | Persistência | EBS gp3 separado, montado em `/data/mongo` | REQ-04: recriar a VM ou o contêiner não apaga dados |
 | Backup | `mongodump` a cada 6h → local (7 dias) + S3 (14 dias), via instance profile | Cópia fora da VM sem chaves gravadas na máquina |
-| HTTPS | Caddy + DuckDNS | Certificado válido sem comprar domínio; a pipeline atualiza o DNS com o IP de cada `apply`. Sem DuckDNS cai para `<ip>.sslip.io`, sujeito ao limite de certificados compartilhado |
+| HTTPS | Caddy + domínio do grupo na Cloudflare | Certificado Let's Encrypt emitido na VM; a pipeline atualiza o registro DNS com o IP de cada `apply` pela API da Cloudflare (alternativas: DuckDNS ou sslip.io) |
 | Acesso às VMs | Somente chave SSH; SSH do runner liberado só durante a execução; VM do banco via bastion | REQ-03: superfície mínima de administração |
 | Segredos | GitHub Secrets → variáveis de ambiente → arquivos `.env` 0600 nas VMs, tarefas com `no_log` | Nada no código nem nos logs |
 | State | S3 com versionamento, criptografia e trava (`use_lockfile`), um arquivo por ambiente | Proteção e recuperação do state; execuções concorrentes bloqueadas |
@@ -100,5 +100,5 @@ Fluxo de uma requisição: navegador → Caddy (TLS) → Nginx → `/todos` → 
 - Uma zona de disponibilidade: se a zona cair, a aplicação para. Para a feira o risco é aceitável e o custo menor.
 - A lista é compartilhada entre todos os visitantes (comportamento da aplicação); use `reset-list` antes de cada apresentação.
 - Senhas do banco só são aplicadas na primeira inicialização do volume; trocar depois exige recriar o volume ou alterar no Mongo.
-- Data da feira, público esperado e domínio não foram informados: assumimos até ~50 visitantes simultâneos e o domínio gratuito do DuckDNS.
+- Data da feira, público esperado e domínio não foram informados: assumimos até ~50 visitantes simultâneos e o domínio `mensal.belottimoveis.com.br`.
 - Com o NAT desligado, a VM do banco não recebe atualizações do SO nem novas imagens; os backups continuam pelo endpoint S3.

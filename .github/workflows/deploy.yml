@@ -144,19 +144,12 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Apontar o domínio DuckDNS para o IP da aplicação
+      - name: Apontar o domínio (Cloudflare/DuckDNS) para o IP da aplicação
         if: inputs.action == 'apply'
         env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
-        run: |
-          DOMAIN=$(jq -r .app_domain.value tf-outputs.json)
-          IP=$(jq -r .app_public_ip.value tf-outputs.json)
-          if [ -z "$DUCKDNS_TOKEN" ] || [[ "$DOMAIN" != *.duckdns.org ]]; then
-            echo "DuckDNS não configurado - usando $DOMAIN"
-            exit 0
-          fi
-          curl -fsS "https://www.duckdns.org/update?domains=${DOMAIN%.duckdns.org}&token=${DUCKDNS_TOKEN}&ip=${IP}" | grep -qx OK
-          echo "$DOMAIN -> $IP"
+        run: bash scripts/dns-update.sh tf-outputs.json
 
       - name: Guardar saídas para o Ansible
         if: inputs.action == 'apply'

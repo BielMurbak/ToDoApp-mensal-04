@@ -16,7 +16,7 @@
 | NAT Gateway (dados processados, ~2 GB) | 2 GB | 0,045/GB | 0,09 |
 | S3 (state + backups, < 1 GB) | – | 0,023/GB-mês | < 0,10 |
 | Tráfego de saída para a internet | < 100 GB | primeiros 100 GB/mês gratuitos | 0,00 |
-| Endpoint S3 (gateway), Let's Encrypt, DuckDNS, GitHub Actions/GHCR (repo público) | – | gratuito | 0,00 |
+| Endpoint S3 (gateway), Let's Encrypt, DNS na Cloudflare (domínio já pago pelo grupo), GitHub Actions/GHCR (repo público) | – | gratuito | 0,00 |
 | **Total com NAT** | | | **≈ 58,9** |
 | **Total sem NAT** (desligado após configurar) | | | **≈ 22,3** |
 

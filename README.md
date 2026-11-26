@@ -48,7 +48,8 @@ Em **Settings → Secrets and variables → Actions → Secrets**:
 | `AWS_SESSION_TOKEN` | Só AWS Academy (expira a cada ~4 h: atualize antes de rodar) |
 | `SSH_PRIVATE_KEY` / `SSH_PUBLIC_KEY` | Conteúdo de `pm04` e `pm04.pub` |
 | `MONGO_ROOT_PASSWORD` / `MONGO_APP_PASSWORD` | Senhas só com letras e números (ex.: `openssl rand -hex 16`) |
-| `DUCKDNS_TOKEN` | Token do [duckdns.org](https://www.duckdns.org) (recomendado, ver abaixo) |
+| `CLOUDFLARE_API_TOKEN` | Token da Cloudflare com permissão de editar o DNS do domínio (ver abaixo) |
+| `DUCKDNS_TOKEN` | Alternativa gratuita sem domínio próprio: token do [duckdns.org](https://www.duckdns.org) |
 
 ### 3. Variables (opcionais)
 
@@ -58,20 +59,25 @@ Na aba **Variables**:
 | --- | --- | --- |
 | `AWS_REGION` | `us-east-1` | Região |
 | `INSTANCE_PROFILE_NAME` | (vazio: o Terraform cria) | AWS Academy: `LabInstanceProfile` |
-| `APP_DOMAIN` | `<ip>.sslip.io` | **Recomendado:** `<nome>.duckdns.org` (a pipeline aponta o DNS para o IP sozinha) |
+| `APP_DOMAIN` | `<ip>.sslip.io` | Domínio da aplicação, ex.: `mensal.belottimoveis.com.br` (a pipeline aponta o DNS para o IP sozinha) |
 | `ACME_EMAIL` | (vazio) | E-mail do certificado; habilita o ZeroSSL como reserva do Let's Encrypt |
 | `ADMIN_CIDRS` | `[]` | IPs com SSH de diagnóstico, ex.: `["200.1.2.3/32"]` |
 | `ENABLE_NAT_GATEWAY` | `true` | `false` desliga o NAT (economia; ver custos) |
 
-### 4. Domínio HTTPS gratuito (DuckDNS)
+### 4. Domínio HTTPS
 
-O endereço `<ip>.sslip.io` funciona sem cadastro, mas o sslip.io é compartilhado por muita gente e pode bater no limite de certificados do Let's Encrypt. Para não depender disso:
+A cada `apply` a VM ganha um IP novo; a pipeline (`scripts/dns-update.sh`) atualiza o DNS sozinha e o Caddy emite o certificado.
 
-1. Entre em [duckdns.org](https://www.duckdns.org) com a conta do GitHub e crie um subdomínio, ex.: `todo-pm04`.
-2. Copie o **token** da página para o Secret `DUCKDNS_TOKEN`.
-3. Crie a Variable `APP_DOMAIN = todo-pm04.duckdns.org` e a `ACME_EMAIL` com o e-mail do grupo.
+**Domínio na Cloudflare (usado pelo grupo: `mensal.belottimoveis.com.br`)**
 
-A cada `apply` a pipeline atualiza o DuckDNS com o IP novo da VM.
+1. Cloudflare → ícone do perfil → **My Profile → API Tokens → Create Token**.
+2. Modelo **Edit zone DNS** → em *Zone Resources* escolha **Specific zone → belottimoveis.com.br** → **Continue → Create Token**.
+3. Copie o token para o Secret `CLOUDFLARE_API_TOKEN`.
+4. Variables: `APP_DOMAIN = mensal.belottimoveis.com.br` e `ACME_EMAIL` com o e-mail do grupo.
+
+O registro é criado como **DNS only** (nuvem cinza), porque o HTTPS é feito pelo Caddy na VM. Se o nome já for um CNAME, a pipeline para com erro em vez de apagá-lo: remova o registro antigo no painel.
+
+**Sem domínio próprio:** crie um subdomínio grátis em [duckdns.org](https://www.duckdns.org), use `DUCKDNS_TOKEN` e `APP_DOMAIN = <nome>.duckdns.org`. Sem nenhum dos dois, o endereço é `<ip>.sslip.io` (pode bater no limite de certificados do Let's Encrypt).
 
 ### 5. Publicar as imagens
 
