@@ -268,6 +268,8 @@ jobs:
 
       - name: Backup final para o S3 antes de remover o volume
         if: steps.exists.outputs.running == 'true'
+        # VM inacessível não pode impedir a desativação; os backups do cron continuam no S3
+        continue-on-error: true
         working-directory: ansible
         env:
           MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
