@@ -9,6 +9,11 @@
     url: https://download.docker.com/linux/ubuntu/gpg
     dest: /etc/apt/keyrings/docker.asc
     mode: "0644"
+  # Logo após a criação, a saída pelo NAT da sub-rede privada pode levar alguns instantes
+  register: docker_gpg
+  until: docker_gpg is succeeded
+  retries: 10
+  delay: 15
 
 - name: Adicionar o repositório oficial do Docker
   ansible.builtin.apt_repository:
@@ -29,6 +34,10 @@
       - python3-docker
     state: present
     lock_timeout: 300
+  register: docker_install
+  until: docker_install is succeeded
+  retries: 5
+  delay: 15
 
 - name: Configurar rotação de logs dos contêineres
   ansible.builtin.copy:
