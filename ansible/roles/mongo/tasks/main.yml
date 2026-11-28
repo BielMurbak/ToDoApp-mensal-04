@@ -92,6 +92,10 @@
         print('CRIADO');
       }
   register: mongo_app_user_result
+  # Num volume novo o MongoDB reinicia ao fim da inicialização; tenta de novo até ele voltar
+  until: mongo_app_user_result.rc == 0
+  retries: 12
+  delay: 5
   changed_when: "'CRIADO' in mongo_app_user_result.stdout"
   no_log: true
 
